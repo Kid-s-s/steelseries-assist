@@ -68,6 +68,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        SourceInitialized += (_, _) => DarkWindowFrame.Apply(this);
         _volumeWriter = new VolumeWriteCoordinator(WriteVolumeAsync);
         _volumeWriter.WriteCompleted += VolumeWriteCompleted;
         _volumeWriter.WriteFailed += VolumeWriteFailed;
@@ -307,6 +308,8 @@ public partial class MainWindow : Window
             }
         }, DispatcherPriority.ContextIdle);
     }
+
+    private void CloseToTray_Click(object sender, RoutedEventArgs e) => Close();
 
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
