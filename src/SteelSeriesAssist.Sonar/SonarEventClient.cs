@@ -21,6 +21,8 @@ public sealed class SonarEventClient : IAsyncDisposable
 
     public event Action<bool>? ConnectionStateChanged;
 
+    public event Action? ChatMixChanged;
+
     public bool IsConnected => _isConnected;
 
     public void Start(Uri sonarHttpAddress)
@@ -188,7 +190,14 @@ public sealed class SonarEventClient : IAsyncDisposable
 
             try
             {
-                var updates = ParseVolumeEvent(Encoding.UTF8.GetString(message.GetBuffer(), 0, checked((int)message.Length)));
+                var json = Encoding.UTF8.GetString(message.GetBuffer(), 0, checked((int)message.Length));
+                using var document = JsonDocument.Parse(json);
+                if (document.RootElement.TryGetProperty("event", out var eventName) &&
+                    eventName.GetString() == "EVENT_SONAR_CHATMIX_DATA")
+                {
+                    ChatMixChanged?.Invoke();
+                }
+                var updates = ParseVolumeEvent(json);
                 if (updates.Count > 0)
                 {
                     VolumeChanged?.Invoke(updates);

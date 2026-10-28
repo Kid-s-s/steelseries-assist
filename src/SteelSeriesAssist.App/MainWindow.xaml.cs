@@ -73,6 +73,7 @@ public partial class MainWindow : Window
         _volumeWriter.WriteFailed += VolumeWriteFailed;
         _sonarEventClient.VolumeChanged += SonarVolumeChanged;
         _sonarEventClient.ConnectionStateChanged += SonarEventConnectionChanged;
+        _sonarEventClient.ChatMixChanged += () => Dispatcher.BeginInvoke(() => ChatMix.Refresh());
 
         _syncTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
         _syncTimer.Tick += (_, _) =>
@@ -148,6 +149,7 @@ public partial class MainWindow : Window
                 .Where(device => device.State == "active" && !device.IsVirtual)
                 .ToArray();
             var nextRows = snapshot.Volumes
+                .Where(volume => SonarChannelAvailability.IsVisible(volume.Channel, snapshot.Devices))
                 .OrderBy(volume => VolumeSortOrder(volume.Channel))
                 .Select(volume =>
             {
@@ -316,6 +318,7 @@ public partial class MainWindow : Window
         else
         {
             _syncTimer.Stop();
+            ChatMix.Dispose();
             _volumeFallbackTimer.Stop();
             _sonarEventClient.DisposeAsync().AsTask().GetAwaiter().GetResult();
             _volumeWriter.DisposeAsync().AsTask().GetAwaiter().GetResult();
@@ -584,6 +587,7 @@ public partial class MainWindow : Window
 
     private void StartEventClient(Uri baseAddress)
     {
+        ChatMix.Connect(baseAddress);
         if (_eventBaseAddress == baseAddress)
         {
             return;
