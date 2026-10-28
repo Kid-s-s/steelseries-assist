@@ -5,7 +5,7 @@
         Title="SteelSeries Assist"
         Icon="Assets/steelseries-assist.ico"
         Width="460"
-        Height="560"
+        Height="720"
         ResizeMode="NoResize"
         ShowInTaskbar="False"
         WindowStyle="ToolWindow"

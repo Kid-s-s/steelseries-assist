@@ -29,6 +29,10 @@ public partial class App : System.Windows.Application
         }
 
         _mainWindow = new MainWindow();
+        _mainWindow.DpiChanged += (_, _) => Dispatcher.BeginInvoke(() =>
+        {
+            if (_mainWindow?.IsVisible == true) PanelPlacement.Place(_mainWindow, atCursor: false);
+        });
         _mainWindow.HideOnDeactivate = !isSmokeTest;
         MainWindow = _mainWindow;
 
@@ -104,10 +108,9 @@ public partial class App : System.Windows.Application
             return;
         }
 
-        var workArea = SystemParameters.WorkArea;
-        _mainWindow.Left = workArea.Right - _mainWindow.Width - 12;
-        _mainWindow.Top = workArea.Bottom - _mainWindow.Height - 12;
+        PanelPlacement.Place(_mainWindow, atCursor: true);
         _mainWindow.Show();
+        PanelPlacement.Place(_mainWindow, atCursor: true);
         _mainWindow.Activate();
         _mainWindow.LoadSonarStateAsync();
     }
