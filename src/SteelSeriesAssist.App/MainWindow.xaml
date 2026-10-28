@@ -21,7 +21,7 @@
         Deactivated="Window_Deactivated"
         Closing="Window_Closing">
     <shell:WindowChrome.WindowChrome>
-        <shell:WindowChrome CaptionHeight="32" ResizeBorderThickness="0" GlassFrameThickness="0"
+        <shell:WindowChrome CaptionHeight="56" ResizeBorderThickness="0" GlassFrameThickness="0"
                             CornerRadius="0" UseAeroCaptionButtons="False" />
     </shell:WindowChrome.WindowChrome>
     <Window.Resources>
@@ -518,12 +518,19 @@
         </Style>
     </Window.Resources>
 
-    <DockPanel Background="#171F24">
-        <Grid DockPanel.Dock="Top" Height="32">
-            <TextBlock Text="SteelSeries Assist" Margin="14,0,48,0" FontSize="11"
-                       Foreground="#909BA8" VerticalAlignment="Center" IsHitTestVisible="False" />
+    <Grid x:Name="LayoutRoot" Margin="22">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Grid Height="30">
+            <TextBlock Text="SteelSeries Assist" Margin="0,0,44,0" FontSize="18" FontWeight="SemiBold"
+                       Foreground="#D0D9F6" VerticalAlignment="Center" IsHitTestVisible="False" />
             <Button x:Name="CloseToTrayButton" HorizontalAlignment="Right" VerticalAlignment="Center"
-                    Width="30" Height="26" Margin="0,0,6,0" Click="CloseToTray_Click"
+                    Width="30" Height="26" Click="CloseToTray_Click"
                     shell:WindowChrome.IsHitTestVisibleInChrome="True"
                     ToolTip="收起到托盘" AutomationProperties.Name="收起到托盘" FocusVisualStyle="{x:Null}">
                 <Button.Template>
@@ -552,23 +559,12 @@
                 </Button.Template>
             </Button>
         </Grid>
-    <Grid x:Name="LayoutRoot" Margin="22">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
-        </Grid.RowDefinitions>
-
-        <DockPanel>
-            <TextBlock Foreground="#D0D9F6" FontSize="22" FontWeight="SemiBold"
-                       Text="SteelSeries Assist" />
-            <Ellipse x:Name="StatusDot" DockPanel.Dock="Right" Width="9" Height="9"
-                     Margin="8" Fill="#61697A" />
+        <DockPanel Grid.Row="1" Margin="0,8,0,16" LastChildFill="True">
+            <Ellipse x:Name="StatusDot" Width="6" Height="6" Margin="0,0,7,0"
+                     VerticalAlignment="Center" Fill="#61697A" />
+            <TextBlock x:Name="StatusText" Foreground="#868FA2" Text="正在连接 Sonar…"
+                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
         </DockPanel>
-
-        <TextBlock x:Name="StatusText" Grid.Row="1" Margin="0,8,0,16"
-                   Foreground="#868FA2" Text="正在连接 Sonar…" />
 
         <TabControl Grid.Row="2" Style="{StaticResource MainTabControlStyle}">
             <TabItem Header="音量与设备">
@@ -750,5 +746,4 @@
             </Border>
         </Canvas>
     </Grid>
-    </DockPanel>
 </Window>
