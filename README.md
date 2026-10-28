@@ -18,6 +18,8 @@ SteelSeries Assist 是 SteelSeries GG / Sonar 的轻量级 Windows 托盘控制�
 
 ## 运行发布版
 
+托盘图标右键菜单可勾选“开机启动”，登录 Windows 后会静默进入托盘，无需管理员权限。默认不添加启动项；便携版请先放到固定目录，再启用。移动程序目录后需重新勾选，以更新启动路径。
+
 发布包为 Windows x64 自包含便携版本，无需另行安装 .NET。启动前请先安装 SteelSeries GG 并启用 Sonar，解压后运行 `SteelSeriesAssist.exe`。
 
 ## 构建与运行

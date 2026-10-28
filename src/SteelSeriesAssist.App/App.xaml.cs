@@ -38,6 +38,37 @@ public partial class App : System.Windows.Application
 
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("打开控制面板", null, (_, _) => ShowPanel());
+        var startupItem = new Forms.ToolStripMenuItem("开机启动")
+        {
+            ToolTipText = "登录 Windows 后静默启动到托盘；请先将便携版放到固定目录。"
+        };
+        menu.Items.Add(startupItem);
+        menu.Opening += (_, _) =>
+        {
+            try
+            {
+                startupItem.Checked = StartupRegistration.IsEnabled();
+                startupItem.Enabled = true;
+            }
+            catch (Exception exception)
+            {
+                startupItem.Checked = false;
+                startupItem.Enabled = false;
+                startupItem.ToolTipText = $"无法读取启动设置：{exception.Message}";
+            }
+        };
+        startupItem.Click += (_, _) =>
+        {
+            try
+            {
+                StartupRegistration.SetEnabled(!startupItem.Checked);
+                startupItem.Checked = StartupRegistration.IsEnabled();
+            }
+            catch (Exception exception)
+            {
+                _trayIcon?.ShowBalloonTip(5000, "开机启动设置失败", exception.Message, Forms.ToolTipIcon.Error);
+            }
+        };
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => ExitApplication());
 
