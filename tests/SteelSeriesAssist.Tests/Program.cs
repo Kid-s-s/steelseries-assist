@@ -9,6 +9,8 @@ var tests = new List<(string Name, Func<Task> Run)>
     ("Operation scope cancels and waits for async cleanup", OperationScopeTests.StopWaitsForContinuations),
     ("Operation scope waits for all admitted work", OperationScopeTests.ScopeWaitsForEveryOperation),
     ("Volume writer stops admission and drains on disposal", OperationScopeTests.WriterStopsAdmissionAndWaits),
+    ("Event inbox bounds a 50000-event burst and merges partial state", UpdateInboxTests.BurstPreservesLatestPartialState),
+    ("Event inbox retains hidden state and stops after disposal", UpdateInboxTests.HiddenAndDisposedDoNotPost),
     ("Event client serializes 300 restarts and disposal", EventClientTests.RestartAndDispose),
     ("Event reader bounds fragmented messages", EventClientTests.FragmentBoundaries),
     ("Event reader times out fragments but permits idle", EventClientTests.FragmentTimeoutAndIdle),

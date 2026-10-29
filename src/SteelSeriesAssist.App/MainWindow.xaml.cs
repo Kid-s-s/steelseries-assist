@@ -38,6 +38,7 @@ public partial class MainWindow : Window
     private readonly SonarEventClient _sonarEventClient = new();
     private readonly WindowsAudioEndpointVolume _endpointVolume = new();
     private readonly VolumeWriteCoordinator _volumeWriter;
+    private readonly SonarUpdateInbox _eventInbox;
     private readonly AsyncOperationScope _operations = new();
     private Task? _shutdownTask;
     private bool _isClosing;
@@ -73,6 +74,9 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         SourceInitialized += (_, _) => DarkWindowFrame.Apply(this);
+        _eventInbox = new SonarUpdateInbox(
+            action => Dispatcher.BeginInvoke(action, DispatcherPriority.Background), ApplyEventBatch);
+        IsVisibleChanged += (_, _) => _eventInbox.SetActive(IsVisible);
         _volumeWriter = new VolumeWriteCoordinator(WriteVolumeAsync);
         _volumeWriter.WriteCompleted += VolumeWriteCompleted;
         _volumeWriter.WriteFailed += VolumeWriteFailed;
@@ -345,6 +349,7 @@ public partial class MainWindow : Window
         _isClosing = true;
         _syncTimer.Stop();
         _volumeFallbackTimer.Stop();
+        _eventInbox.Dispose();
         _sonarEventClient.VolumeChanged -= SonarVolumeChanged;
         _sonarEventClient.ConnectionStateChanged -= SonarEventConnectionChanged;
         _sonarEventClient.ChatMixChanged -= SonarChatMixChanged;
@@ -581,43 +586,23 @@ public partial class MainWindow : Window
         return await client.SetChannelMutedAsync(channel, volume <= 0f, cancellationToken);
     }
 
-    private void VolumeWriteCompleted(string channel, VolumeState confirmed, bool isFinal)
+    private void VolumeWriteCompleted(string channel, VolumeState confirmed, bool isFinal) =>
+        _eventInbox.PublishWriteCompleted(channel, confirmed, isFinal);
+
+    private void VolumeWriteFailed(string channel, Exception exception) =>
+        _eventInbox.PublishWriteFailed(channel, exception.Message);
+
+    private void SonarVolumeChanged(IReadOnlyList<ChannelVolumeUpdate> updates) => _eventInbox.PublishVolumes(updates);
+    private void SonarChatMixChanged() => _eventInbox.PublishChatMix();
+
+    private void SonarEventConnectionChanged(bool connected) => _eventInbox.PublishConnection(connected);
+
+    private void ApplyEventBatch(SonarUpdateBatch batch)
     {
-        Dispatcher.BeginInvoke(() =>
+        ApplyVolumeUpdates(batch.Volumes);
+        if (batch.ChatMixChanged) ChatMix.Refresh();
+        if (batch.Connected is bool connected)
         {
-            if (_isClosing) return;
-            if (!_volumeDragChannels.Contains(channel))
-            {
-                ApplyVolumeUpdates([new ChannelVolumeUpdate(channel, confirmed.Volume, confirmed.Muted)]);
-            }
-
-            if (isFinal && _channelRows.TryGetValue(channel, out var row))
-            {
-                ActionStatusText.Text = $"已更新{row.DisplayName}音量";
-            }
-        });
-    }
-
-    private void VolumeWriteFailed(string channel, Exception exception)
-    {
-        Dispatcher.BeginInvoke(() =>
-        {
-            if (_isClosing) return;
-            ActionStatusText.Text = $"音量同步失败：{exception.Message}";
-            RefreshVolumesFallbackAsync();
-        });
-    }
-
-    private void SonarVolumeChanged(IReadOnlyList<ChannelVolumeUpdate> updates)
-    {
-        Dispatcher.BeginInvoke(() => ApplyVolumeUpdates(updates), DispatcherPriority.DataBind);
-    }
-
-    private void SonarEventConnectionChanged(bool connected)
-    {
-        Dispatcher.BeginInvoke(() =>
-        {
-            if (_isClosing) return;
             ActionStatusText.Text = connected
                 ? "Sonar 实时同步已连接"
                 : "实时同步已断开，正在使用轮询并尝试重连…";
@@ -625,10 +610,18 @@ public partial class MainWindow : Window
             {
                 RefreshVolumesFallbackAsync();
             }
-        });
+        }
+        if (batch.WriteNotice is { } notice)
+        {
+            if (notice.Error is not null)
+            {
+                ActionStatusText.Text = $"音量同步失败：{notice.Error}";
+                RefreshVolumesFallbackAsync();
+            }
+            else if (_channelRows.TryGetValue(notice.Channel, out var row))
+                ActionStatusText.Text = $"已更新{row.DisplayName}音量";
+        }
     }
-
-    private void SonarChatMixChanged() => Dispatcher.BeginInvoke(() => { if (!_isClosing) ChatMix.Refresh(); });
 
     private async Task StartEventClientAsync(Uri baseAddress)
     {
