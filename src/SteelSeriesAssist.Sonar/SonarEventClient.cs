@@ -1,5 +1,4 @@
 using System.Net.WebSockets;
-using System.Text;
 using System.Text.Json;
 using SteelSeriesAssist.Domain;
 
@@ -169,31 +168,14 @@ public sealed class SonarEventClient : IAsyncDisposable
 
     private async Task ReceiveMessagesAsync(ClientWebSocket socket, CancellationToken cancellationToken)
     {
-        var buffer = new byte[16 * 1024];
         while (socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
         {
-            using var message = new MemoryStream();
-            WebSocketReceiveResult result;
-            do
-            {
-                result = await socket.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
-                if (result.MessageType == WebSocketMessageType.Close)
-                {
-                    return;
-                }
-
-                await message.WriteAsync(buffer.AsMemory(0, result.Count), cancellationToken).ConfigureAwait(false);
-            }
-            while (!result.EndOfMessage);
-
-            if (result.MessageType != WebSocketMessageType.Text)
-            {
-                continue;
-            }
+            var json = await SonarMessageReader.ReadAsync(socket, cancellationToken).ConfigureAwait(false);
+            if (json is null) return;
+            if (json.Length == 0) continue;
 
             try
             {
-                var json = Encoding.UTF8.GetString(message.GetBuffer(), 0, checked((int)message.Length));
                 using var document = JsonDocument.Parse(json);
                 if (document.RootElement.TryGetProperty("event", out var eventName) &&
                     eventName.GetString() == "EVENT_SONAR_CHATMIX_DATA")
