@@ -38,6 +38,10 @@ public partial class MainWindow : Window
     private readonly SonarEventClient _sonarEventClient = new();
     private readonly WindowsAudioEndpointVolume _endpointVolume = new();
     private readonly VolumeWriteCoordinator _volumeWriter;
+    private readonly AsyncOperationScope _operations = new();
+    private Task? _shutdownTask;
+    private bool _isClosing;
+    private bool _shutdownComplete;
     private readonly Dictionary<string, ChannelRow> _channelRows = [];
     private readonly HashSet<string> _volumeDragChannels = [];
     private readonly HashSet<string> _loadedEqChannels = [];
@@ -74,7 +78,7 @@ public partial class MainWindow : Window
         _volumeWriter.WriteFailed += VolumeWriteFailed;
         _sonarEventClient.VolumeChanged += SonarVolumeChanged;
         _sonarEventClient.ConnectionStateChanged += SonarEventConnectionChanged;
-        _sonarEventClient.ChatMixChanged += () => Dispatcher.BeginInvoke(() => ChatMix.Refresh());
+        _sonarEventClient.ChatMixChanged += SonarChatMixChanged;
 
         _syncTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
         _syncTimer.Tick += (_, _) =>
@@ -99,12 +103,15 @@ public partial class MainWindow : Window
         _volumeFallbackTimer.Start();
     }
 
-    public async void LoadSonarStateAsync(
+    public void LoadSonarStateAsync(
         bool showConnecting = true,
         bool includeRoutingData = false,
         bool includeEqPresets = false)
+        => _ = _operations.RunAsync(_ => LoadSonarStateCoreAsync(showConnecting, includeRoutingData, includeEqPresets));
+
+    private async Task LoadSonarStateCoreAsync(bool showConnecting, bool includeRoutingData, bool includeEqPresets)
     {
-        if (_isLoading)
+        if (_isLoading || _isClosing)
         {
             return;
         }
@@ -123,25 +130,27 @@ public partial class MainWindow : Window
             {
                 try
                 {
-                    snapshot = await _sonarClient.GetSnapshotAsync(includeRoutingData, includeEqPresets);
+                    snapshot = await _sonarClient.GetSnapshotAsync(includeRoutingData, includeEqPresets, _operations.Token);
                 }
+                catch (OperationCanceledException) when (_operations.Token.IsCancellationRequested) { throw; }
                 catch
                 {
                     _sonarClient.Dispose();
                     _sonarClient = null;
-                    var recovered = await _stateService.LoadAsync(includeRoutingData, includeEqPresets);
+                    var recovered = await _stateService.LoadAsync(includeRoutingData, includeEqPresets, _operations.Token);
                     _sonarClient = new SonarClient(recovered.Endpoint.BaseAddress);
-                    StartEventClient(recovered.Endpoint.BaseAddress);
+                    await StartEventClientAsync(recovered.Endpoint.BaseAddress);
                     snapshot = recovered.Snapshot;
                 }
             }
             else
             {
-                var initial = await _stateService.LoadAsync(includeRoutingData, includeEqPresets);
+                var initial = await _stateService.LoadAsync(includeRoutingData, includeEqPresets, _operations.Token);
                 _sonarClient = new SonarClient(initial.Endpoint.BaseAddress);
-                StartEventClient(initial.Endpoint.BaseAddress);
+                await StartEventClientAsync(initial.Endpoint.BaseAddress);
                 snapshot = initial.Snapshot;
             }
+            _operations.Token.ThrowIfCancellationRequested();
             _endpointVolume.UpdateDevices(snapshot.Devices);
             var bindings = snapshot.Bindings.ToDictionary(
                 binding => NormalizeBindingChannel(binding.Channel),
@@ -225,6 +234,7 @@ public partial class MainWindow : Window
             StatusText.Text = $"Sonar 已连接 · {snapshot.Devices.Count(device => device.State == "active")} 个活动设备";
             StatusDot.Fill = new SolidColorBrush(MediaColor.FromRgb(2, 221, 188));
         }
+        catch (OperationCanceledException) when (_operations.Token.IsCancellationRequested) { }
         catch (Exception exception)
         {
             StatusText.Text = $"Sonar 不可用：{exception.Message}";
@@ -233,12 +243,12 @@ public partial class MainWindow : Window
         finally
         {
             _isLoading = false;
-            if (includeRoutingData)
+            if (!_isClosing && includeRoutingData)
             {
                 _hasLoadedHeavyData = true;
                 _isDeferredLoading = false;
             }
-            else if (!_hasLoadedHeavyData && !_isDeferredLoading)
+            else if (!_isClosing && !_hasLoadedHeavyData && !_isDeferredLoading)
             {
                 _isDeferredLoading = true;
                 _ = Dispatcher.BeginInvoke(
@@ -302,6 +312,7 @@ public partial class MainWindow : Window
         FinishTrackVolumeDrag();
         Dispatcher.BeginInvoke(() =>
         {
+            if (_isClosing) return;
             if (!_isDeviceDropDownOpen && !_isDragging && !IsKeyboardFocusWithin)
             {
                 Hide();
@@ -311,21 +322,44 @@ public partial class MainWindow : Window
 
     private void CloseToTray_Click(object sender, RoutedEventArgs e) => Close();
 
-    private void Window_Closing(object? sender, CancelEventArgs e)
+    private async void Window_Closing(object? sender, CancelEventArgs e)
     {
         if (!AllowClose)
         {
             e.Cancel = true;
             Hide();
         }
-        else
+        else if (!_shutdownComplete)
         {
-            _syncTimer.Stop();
-            ChatMix.Dispose();
-            _volumeFallbackTimer.Stop();
-            _sonarEventClient.DisposeAsync().AsTask().GetAwaiter().GetResult();
-            _volumeWriter.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            e.Cancel = true;
+            if (_isClosing) return;
+            try { await ShutdownAsync(); }
+            finally { _ = Dispatcher.BeginInvoke(Close); }
+        }
+    }
+
+    public Task ShutdownAsync() => _shutdownTask ??= ShutdownCoreAsync();
+
+    private async Task ShutdownCoreAsync()
+    {
+        _isClosing = true;
+        _syncTimer.Stop();
+        _volumeFallbackTimer.Stop();
+        _sonarEventClient.VolumeChanged -= SonarVolumeChanged;
+        _sonarEventClient.ConnectionStateChanged -= SonarEventConnectionChanged;
+        _sonarEventClient.ChatMixChanged -= SonarChatMixChanged;
+        _volumeWriter.WriteCompleted -= VolumeWriteCompleted;
+        _volumeWriter.WriteFailed -= VolumeWriteFailed;
+        try
+        {
+            await Task.WhenAll(_operations.DisposeAsync().AsTask(), ChatMix.DisposeAsync().AsTask(),
+                _sonarEventClient.DisposeAsync().AsTask(), _volumeWriter.DisposeAsync().AsTask());
+        }
+        finally
+        {
             _sonarClient?.Dispose();
+            _sonarClient = null;
+            _shutdownComplete = true;
         }
     }
 
@@ -355,6 +389,7 @@ public partial class MainWindow : Window
         e.Handled = true;
         Dispatcher.BeginInvoke(() =>
         {
+            if (_isClosing) return;
             if (_trackDragSlider != slider)
             {
                 return;
@@ -477,7 +512,7 @@ public partial class MainWindow : Window
 
     private void VolumeSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (_isApplyingRemoteVolume || _isLoading ||
+        if (_isClosing || _isApplyingRemoteVolume || _isLoading ||
             sender is not Slider { DataContext: ChannelRow row } slider ||
             (!_volumeDragChannels.Contains(row.Channel) && !slider.IsKeyboardFocusWithin))
         {
@@ -511,6 +546,7 @@ public partial class MainWindow : Window
 
     private void VolumeSlider_KeyUp(object sender, System.Windows.Input.KeyEventArgs e)
     {
+        if (_isClosing) return;
         if (sender is Slider { DataContext: ChannelRow row } slider &&
             e.Key is Key.Left or Key.Right or Key.Up or Key.Down or Key.Home or Key.End or Key.PageUp or Key.PageDown)
         {
@@ -520,6 +556,7 @@ public partial class MainWindow : Window
 
     private void CompleteVolumeInteraction(Slider slider, ChannelRow row)
     {
+        if (_isClosing) return;
         if (!_volumeDragChannels.Remove(row.Channel))
         {
             return;
@@ -548,6 +585,7 @@ public partial class MainWindow : Window
     {
         Dispatcher.BeginInvoke(() =>
         {
+            if (_isClosing) return;
             if (!_volumeDragChannels.Contains(channel))
             {
                 ApplyVolumeUpdates([new ChannelVolumeUpdate(channel, confirmed.Volume, confirmed.Muted)]);
@@ -564,6 +602,7 @@ public partial class MainWindow : Window
     {
         Dispatcher.BeginInvoke(() =>
         {
+            if (_isClosing) return;
             ActionStatusText.Text = $"音量同步失败：{exception.Message}";
             RefreshVolumesFallbackAsync();
         });
@@ -578,6 +617,7 @@ public partial class MainWindow : Window
     {
         Dispatcher.BeginInvoke(() =>
         {
+            if (_isClosing) return;
             ActionStatusText.Text = connected
                 ? "Sonar 实时同步已连接"
                 : "实时同步已断开，正在使用轮询并尝试重连…";
@@ -588,19 +628,23 @@ public partial class MainWindow : Window
         });
     }
 
-    private void StartEventClient(Uri baseAddress)
+    private void SonarChatMixChanged() => Dispatcher.BeginInvoke(() => { if (!_isClosing) ChatMix.Refresh(); });
+
+    private async Task StartEventClientAsync(Uri baseAddress)
     {
-        ChatMix.Connect(baseAddress);
+        await ChatMix.ConnectAsync(baseAddress);
         if (_eventBaseAddress == baseAddress)
         {
             return;
         }
 
+        await _sonarEventClient.StartAsync(baseAddress, _operations.Token);
         _eventBaseAddress = baseAddress;
-        _sonarEventClient.Start(baseAddress);
     }
 
-    private async void RefreshVolumesFallbackAsync()
+    private void RefreshVolumesFallbackAsync() => _ = _operations.RunAsync(_ => RefreshVolumesCoreAsync());
+
+    private async Task RefreshVolumesCoreAsync()
     {
         if (_isFallbackLoading || _sonarClient is null)
         {
@@ -610,7 +654,7 @@ public partial class MainWindow : Window
         _isFallbackLoading = true;
         try
         {
-            var volumes = await _sonarClient.GetClassicVolumesAsync();
+            var volumes = await _sonarClient.GetClassicVolumesAsync(_operations.Token);
             ApplyVolumeUpdates(volumes.Select(volume =>
                 new ChannelVolumeUpdate(volume.Channel, volume.State.Volume, volume.State.Muted)).ToArray());
         }
@@ -737,7 +781,7 @@ public partial class MainWindow : Window
             var confirmed = await WriteVolumeAsync(
                 row.Channel,
                 targetPercent / 100f,
-                CancellationToken.None);
+                _operations.Token);
             row.Percent = confirmed.Muted ? 0 : (int)Math.Round(confirmed.Volume * 100);
             row.Muted = confirmed.Muted;
         }, targetMuted ? $"已静音{row.DisplayName}" : $"已恢复{row.DisplayName}音量");
@@ -753,7 +797,7 @@ public partial class MainWindow : Window
 
         await ExecuteWriteAsync(async () =>
         {
-            var confirmed = await _sonarClient.SetChannelBindingAsync(row.BindingChannel, selected.Id);
+            var confirmed = await _sonarClient.SetChannelBindingAsync(row.BindingChannel, selected.Id, _operations.Token);
             row.UpdateDeviceOptions(row.DeviceOptions, confirmed.DeviceId);
         }, $"{row.DisplayName}已切换到 {selected.Name}");
     }
@@ -781,7 +825,7 @@ public partial class MainWindow : Window
             _ = Dispatcher.BeginInvoke(() => CenterSelectedEqOption(comboBox), DispatcherPriority.ContextIdle);
         }
 
-        _ = LoadEqOptionsAsync(row);
+        _ = _operations.RunAsync(_ => LoadEqOptionsAsync(row));
     }
 
     private async Task LoadEqOptionsAsync(ChannelRow row)
@@ -802,7 +846,7 @@ public partial class MainWindow : Window
             // Revalidate a channel when its menu is opened. GG does not provide a dependable
             // preset-catalogue-changed event, so retaining the old list forever would hide
             // presets added, deleted, or re-favorited in GG.
-            var presets = await _sonarClient.GetEqPresetsAsync(row.Channel, forceRefresh: hadCachedOptions);
+            var presets = await _sonarClient.GetEqPresetsAsync(row.Channel, cancellationToken: _operations.Token, forceRefresh: hadCachedOptions);
             var options = presets
                 .OrderByDescending(preset => preset.IsFavorite)
                 .ThenBy(preset => preset.FavoritePosition)
@@ -812,6 +856,7 @@ public partial class MainWindow : Window
             row.UpdateEqOptions(options, row.SelectedEq?.Id);
             _loadedEqChannels.Add(row.Channel);
         }
+        catch (OperationCanceledException) when (_operations.Token.IsCancellationRequested) { }
         catch (Exception exception)
         {
             ActionStatusText.Text = $"EQ 加载失败：{exception.Message}";
@@ -894,7 +939,7 @@ public partial class MainWindow : Window
 
         await ExecuteWriteAsync(async () =>
         {
-            await _sonarClient.SelectEqPresetAsync(selected.Id);
+            await _sonarClient.SelectEqPresetAsync(selected.Id, _operations.Token);
             row.UpdateEqOptions(row.AllEqOptions, selected.Id);
         }, $"{row.DisplayName}已切换到 {selected.Name}");
     }
@@ -1051,8 +1096,8 @@ public partial class MainWindow : Window
         ResetDropTarget();
         await ExecuteWriteAsync(async () =>
         {
-            await _sonarClient.RouteApplicationAsync("render", lane.DeviceId, application.ProcessId);
-            await Task.Delay(250);
+            await _sonarClient.RouteApplicationAsync("render", lane.DeviceId, application.ProcessId, _operations.Token);
+            await Task.Delay(250, _operations.Token);
         }, $"{application.DisplayName}的默认输出已设为 {lane.Name}");
         // Route cards are sourced from /AudioDeviceRouting, which is intentionally omitted
         // from normal lightweight refreshes. Refresh it immediately after a successful drop
@@ -1060,15 +1105,20 @@ public partial class MainWindow : Window
         LoadSonarStateAsync(showConnecting: false, includeRoutingData: true);
     }
 
-    private async Task ExecuteWriteAsync(Func<Task> operation, string successMessage)
+    private Task ExecuteWriteAsync(Func<Task> operation, string successMessage) =>
+        _operations.RunAsync(_ => ExecuteWriteCoreAsync(operation, successMessage));
+
+    private async Task ExecuteWriteCoreAsync(Func<Task> operation, string successMessage)
     {
         _isWriting = true;
         ActionStatusText.Text = "正在应用…";
         try
         {
             await operation();
+            _operations.Token.ThrowIfCancellationRequested();
             ActionStatusText.Text = successMessage;
         }
+        catch (OperationCanceledException) when (_operations.Token.IsCancellationRequested) { }
         catch (Exception exception)
         {
             ActionStatusText.Text = $"操作失败：{exception.Message}";

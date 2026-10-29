@@ -11,6 +11,8 @@ public partial class App : System.Windows.Application
     private Icon? _applicationIcon;
     private MainWindow? _mainWindow;
     private Mutex? _singleInstanceMutex;
+    private Forms.ContextMenuStrip? _trayMenu;
+    private bool _isExiting;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -37,6 +39,7 @@ public partial class App : System.Windows.Application
         MainWindow = _mainWindow;
 
         var menu = new Forms.ContextMenuStrip();
+        _trayMenu = menu;
         menu.Items.Add("打开控制面板", null, (_, _) => ShowPanel());
         var startupItem = new Forms.ToolStripMenuItem("开机启动")
         {
@@ -114,6 +117,7 @@ public partial class App : System.Windows.Application
         }
 
         _applicationIcon?.Dispose();
+        _trayMenu?.Dispose();
 
         _singleInstanceMutex?.Dispose();
 
@@ -146,14 +150,23 @@ public partial class App : System.Windows.Application
         _mainWindow.LoadSonarStateAsync();
     }
 
-    private void ExitApplication()
+    private async void ExitApplication()
     {
-        if (_mainWindow is not null)
+        if (_isExiting) return;
+        _isExiting = true;
+        if (_trayIcon is not null) _trayIcon.Visible = false;
+        try
         {
-            _mainWindow.AllowClose = true;
-            _mainWindow.Close();
+            if (_mainWindow is not null) await _mainWindow.ShutdownAsync();
         }
-
-        Shutdown();
+        finally
+        {
+            if (_mainWindow is not null)
+            {
+                _mainWindow.AllowClose = true;
+                _mainWindow.Close();
+            }
+            Shutdown();
+        }
     }
 }

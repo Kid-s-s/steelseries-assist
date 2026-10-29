@@ -1,17 +1,17 @@
 using System.Windows;
-using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Threading;
+using SteelSeriesAssist.Application;
 using SteelSeriesAssist.Domain;
 using SteelSeriesAssist.Sonar;
 
 namespace SteelSeriesAssist.App;
 
-public partial class ChatMixControl : System.Windows.Controls.UserControl, IDisposable
+public partial class ChatMixControl : System.Windows.Controls.UserControl, IAsyncDisposable
 {
     private readonly DispatcherTimer _refreshTimer;
-    private readonly CancellationTokenSource _lifetime = new();
-    private SonarClient? _client;
+    private readonly SemaphoreSlim _sessions = new(1, 1);
+    private Session? _session;
     private Uri? _address;
     private float? _pending;
     private bool _writing;
@@ -19,6 +19,7 @@ public partial class ChatMixControl : System.Windows.Controls.UserControl, IDisp
     private bool _applying;
     private bool _disposed;
     private int _revision;
+    private Task? _disposeTask;
 
     public ChatMixControl()
     {
@@ -29,36 +30,50 @@ public partial class ChatMixControl : System.Windows.Controls.UserControl, IDisp
         IsVisibleChanged += (_, _) => { if (IsVisible) Refresh(); };
     }
 
-    public void Connect(Uri address)
+    public async Task ConnectAsync(Uri address)
     {
-        if (_disposed || _address == address) return;
-        _revision++;
-        _pending = null;
-        _client?.Dispose();
-        _client = new SonarClient(address);
-        _address = address;
-        SetEnabled(false);
-        HintText.Text = "正在读取聊天混音…";
-        Refresh();
-    }
-
-    public async void Refresh()
-    {
-        if (_disposed || _client is null || !IsVisible || _reading || _writing ||
-            BalanceSlider.IsMouseCaptureWithin || Mouse.LeftButton == MouseButtonState.Pressed) return;
-        _reading = true;
-        var revision = _revision;
-        var client = _client;
+        await _sessions.WaitAsync();
         try
         {
-            var state = await client.GetChatMixAsync(_lifetime.Token);
-            if (!_disposed && revision == _revision && !_writing && !BalanceSlider.IsMouseCaptureWithin)
+            if (_disposed || _address == address) return;
+            _revision++;
+            _pending = null;
+            var previous = _session;
+            _session = null;
+            SetEnabled(false);
+            if (previous is not null) await previous.DisposeAsync();
+            if (_disposed) return;
+            _session = new Session(address);
+            _address = address;
+            HintText.Text = "正在读取聊天混音…";
+            Refresh();
+        }
+        finally { _sessions.Release(); }
+    }
+
+    public void Refresh()
+    {
+        var session = _session;
+        if (_disposed || session is null || !IsVisible || _reading || _writing ||
+            BalanceSlider.IsMouseCaptureWithin || Mouse.LeftButton == MouseButtonState.Pressed) return;
+        _ = session.Operations.RunAsync(token => RefreshAsync(session, token));
+    }
+
+    private async Task RefreshAsync(Session session, CancellationToken token)
+    {
+        _reading = true;
+        var revision = _revision;
+        try
+        {
+            var state = await session.Client.GetChatMixAsync(token);
+            token.ThrowIfCancellationRequested();
+            if (ReferenceEquals(session, _session) && revision == _revision && !_writing && !BalanceSlider.IsMouseCaptureWithin)
                 Apply(state);
         }
-        catch (OperationCanceledException) when (_disposed) { }
-        catch (Exception) when (!_disposed)
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception)
         {
-            if (revision == _revision && !_writing)
+            if (!_disposed && ReferenceEquals(session, _session) && revision == _revision && !_writing)
             {
                 SetEnabled(false);
                 HintText.Text = "聊天混音暂不可用，连接恢复后自动重试";
@@ -98,61 +113,64 @@ public partial class ChatMixControl : System.Windows.Controls.UserControl, IDisp
 
     private void Balance_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (_applying || _disposed || _client is null || !BalanceSlider.IsEnabled) return;
-        // A small central dead zone makes returning to a neutral balance easy.
+        if (_applying || _disposed || _session is null || !BalanceSlider.IsEnabled) return;
         if (Mouse.LeftButton == MouseButtonState.Pressed && Math.Abs(e.NewValue) <= 2 && e.NewValue != 0)
         {
             BalanceSlider.Value = 0;
             return;
         }
         UpdateLabel();
-        _revision++;
-        _pending = (float)(BalanceSlider.Value / 100);
-        if (!_writing) _ = WritePendingAsync();
+        Commit();
     }
 
-    private async Task WritePendingAsync()
+    private async Task WritePendingAsync(Session session, CancellationToken token)
     {
         _writing = true;
         try
         {
-            while (!_disposed && _pending.HasValue && _client is not null)
+            while (_pending.HasValue && !token.IsCancellationRequested)
             {
-                await Task.Delay(90, _lifetime.Token);
+                await Task.Delay(90, token);
                 if (!_pending.HasValue) break;
                 var balance = _pending.Value;
                 _pending = null;
-                var client = _client;
                 var revision = _revision;
                 try
                 {
-                    var confirmed = await client.SetChatMixAsync(balance, _lifetime.Token);
-                    if (!_disposed && revision == _revision && !_pending.HasValue && !BalanceSlider.IsMouseCaptureWithin)
+                    var confirmed = await session.Client.SetChatMixAsync(balance, token);
+                    token.ThrowIfCancellationRequested();
+                    if (revision == _revision && !_pending.HasValue && !BalanceSlider.IsMouseCaptureWithin)
                         Apply(confirmed);
                 }
-                catch (OperationCanceledException) when (_disposed) { break; }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
                 catch (Exception exception)
                 {
-                    if (!_disposed && revision == _revision)
+                    if (!_disposed && ReferenceEquals(session, _session) && revision == _revision)
                     {
-                        // Restore the actual value where possible, then keep the failure visible.
-                        try { Apply(await client.GetChatMixAsync(_lifetime.Token)); }
+                        try
+                        {
+                            var current = await session.Client.GetChatMixAsync(token);
+                            token.ThrowIfCancellationRequested();
+                            if (revision == _revision) Apply(current);
+                        }
+                        catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
                         catch (Exception) { SetEnabled(false); }
                         if (!_disposed) HintText.Text = $"调整失败：{exception.Message}";
                     }
                 }
             }
         }
-        catch (OperationCanceledException) when (_disposed) { }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         finally { _writing = false; }
     }
 
     private void Commit()
     {
-        if (_disposed || !BalanceSlider.IsEnabled || _client is null) return;
+        var session = _session;
+        if (_disposed || !BalanceSlider.IsEnabled || session is null) return;
         _revision++;
         _pending = (float)(BalanceSlider.Value / 100);
-        if (!_writing) _ = WritePendingAsync();
+        if (!_writing) _ = session.Operations.RunAsync(token => WritePendingAsync(session, token));
     }
 
     private void Balance_MouseUp(object sender, MouseButtonEventArgs e) => Commit();
@@ -161,18 +179,33 @@ public partial class ChatMixControl : System.Windows.Controls.UserControl, IDisp
     {
         if (e.Key is Key.Left or Key.Right or Key.Up or Key.Down or Key.Home or Key.End or Key.PageUp or Key.PageDown) Commit();
     }
-    private void Reset_Click(object sender, RoutedEventArgs e)
-    {
-        BalanceSlider.Value = 0;
-        Commit();
-    }
+    private void Reset_Click(object sender, RoutedEventArgs e) { BalanceSlider.Value = 0; Commit(); }
 
-    public void Dispose()
+    public ValueTask DisposeAsync() => new(_disposeTask ??= DisposeCoreAsync());
+
+    private async Task DisposeCoreAsync()
     {
         _disposed = true;
         _refreshTimer.Stop();
-        _lifetime.Cancel();
-        _client?.Dispose();
-        _lifetime.Dispose();
+        _pending = null;
+        await _sessions.WaitAsync();
+        try
+        {
+            var session = _session;
+            _session = null;
+            if (session is not null) await session.DisposeAsync();
+        }
+        finally { _sessions.Release(); }
+    }
+
+    private sealed class Session(Uri address) : IAsyncDisposable
+    {
+        public SonarClient Client { get; } = new(address);
+        public AsyncOperationScope Operations { get; } = new();
+        public async ValueTask DisposeAsync()
+        {
+            try { await Operations.DisposeAsync(); }
+            finally { Client.Dispose(); }
+        }
     }
 }

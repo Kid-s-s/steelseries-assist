@@ -12,10 +12,11 @@ public sealed class SonarEventClient : IAsyncDisposable
     private static readonly TimeSpan[] ReconnectDelays =
         [TimeSpan.Zero, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(10)];
 
-    private readonly object _sync = new();
+    private readonly SemaphoreSlim _lifecycle = new(1, 1);
     private CancellationTokenSource? _lifetimeCancellation;
     private Task? _receiveTask;
     private volatile bool _isConnected;
+    private bool _disposed;
 
     public event Action<IReadOnlyList<ChannelVolumeUpdate>>? VolumeChanged;
 
@@ -25,48 +26,49 @@ public sealed class SonarEventClient : IAsyncDisposable
 
     public bool IsConnected => _isConnected;
 
-    public void Start(Uri sonarHttpAddress)
+    public async Task StartAsync(Uri sonarHttpAddress, CancellationToken cancellationToken = default)
     {
         var socketAddress = CreateSocketAddress(sonarHttpAddress);
-        CancellationTokenSource cancellation;
-        lock (_sync)
+        await _lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            _lifetimeCancellation?.Cancel();
-            _lifetimeCancellation?.Dispose();
-            cancellation = new CancellationTokenSource();
-            _lifetimeCancellation = cancellation;
-            _receiveTask = Task.Run(() => RunReceiveLoopAsync(socketAddress, cancellation.Token));
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            await StopSessionAsync().ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            _lifetimeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var token = _lifetimeCancellation.Token;
+            _receiveTask = Task.Run(() => RunReceiveLoopAsync(socketAddress, token));
         }
+        finally { _lifecycle.Release(); }
     }
 
     public async ValueTask DisposeAsync()
     {
-        Task? receiveTask;
-        lock (_sync)
+        await _lifecycle.WaitAsync().ConfigureAwait(false);
+        try
         {
-            _lifetimeCancellation?.Cancel();
-            receiveTask = _receiveTask;
+            if (_disposed) return;
+            _disposed = true;
+            await StopSessionAsync().ConfigureAwait(false);
         }
+        finally { _lifecycle.Release(); }
+    }
 
-        if (receiveTask is not null)
+    private async Task StopSessionAsync()
+    {
+        _lifetimeCancellation?.Cancel();
+        try
         {
-            try
-            {
-                await receiveTask.ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-            }
+            if (_receiveTask is not null) await _receiveTask.ConfigureAwait(false);
         }
-
-        lock (_sync)
+        catch (OperationCanceledException) { }
+        finally
         {
             _lifetimeCancellation?.Dispose();
             _lifetimeCancellation = null;
             _receiveTask = null;
+            SetConnected(false);
         }
-
-        SetConnected(false);
     }
 
     internal static Uri CreateSocketAddress(Uri sonarHttpAddress)
@@ -148,6 +150,7 @@ public sealed class SonarEventClient : IAsyncDisposable
                 failureCount = 0;
                 SetConnected(true);
                 await ReceiveMessagesAsync(socket, cancellationToken).ConfigureAwait(false);
+                failureCount++;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

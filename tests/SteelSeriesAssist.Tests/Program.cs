@@ -6,6 +6,10 @@ using SteelSeriesAssist.Sonar;
 
 var tests = new List<(string Name, Func<Task> Run)>
 {
+    ("Operation scope cancels and waits for async cleanup", OperationScopeTests.StopWaitsForContinuations),
+    ("Operation scope waits for all admitted work", OperationScopeTests.ScopeWaitsForEveryOperation),
+    ("Volume writer stops admission and drains on disposal", OperationScopeTests.WriterStopsAdmissionAndWaits),
+    ("Event client serializes 300 restarts and disposal", EventClientTests.RestartAndDispose),
     ("Optional channels follow active virtual devices", OptionalChannelsFollowVirtualDevices),
     ("ChatMix falls back and confirms query writes", ChatMixTests.RoundTripAndFallback),
     ("ChatMix rejects unconfirmed writes", ChatMixTests.RejectsUnconfirmedWrite),
